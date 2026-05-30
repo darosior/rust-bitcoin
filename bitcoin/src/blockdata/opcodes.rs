@@ -50,6 +50,13 @@ macro_rules! all_opcodes {
                 #[doc = $doc]
                 pub const $op: Opcode = Opcode { code: $val};
             )*
+
+            /// Bitcoin Inquisition/BIP349 alias for `OP_SUCCESS203`.
+            pub const OP_INTERNALKEY: Opcode = OP_RETURN_203;
+            /// Bitcoin Inquisition/BIP348 alias for `OP_SUCCESS204`.
+            pub const OP_CHECKSIGFROMSTACK: Opcode = OP_RETURN_204;
+            /// Bitcoin Inquisition/BIP446 alias for `OP_SUCCESS206`.
+            pub const OP_TEMPLATEHASH: Opcode = OP_RETURN_206;
         }
 
         /// Push an empty array onto the stack.
@@ -562,6 +569,26 @@ mod tests {
         let op = all::OP_NOP;
         let s = format!("{:>10}", op);
         assert_eq!(s, "    OP_NOP");
+    }
+
+    #[test]
+    fn inquisition_bip448_aliases() {
+        use crate::script::Builder;
+
+        assert_eq!(OP_INTERNALKEY.to_u8(), 0xcb);
+        assert_eq!(OP_CHECKSIGFROMSTACK.to_u8(), 0xcc);
+        assert_eq!(OP_TEMPLATEHASH.to_u8(), 0xce);
+
+        let script = Builder::new()
+            .push_opcode(OP_TEMPLATEHASH)
+            .push_opcode(OP_INTERNALKEY)
+            .push_opcode(OP_CHECKSIGFROMSTACK)
+            .into_script();
+        assert_eq!(script.as_bytes(), &[0xce, 0xcb, 0xcc]);
+
+        assert_eq!(OP_INTERNALKEY.classify(ClassifyContext::TapScript), Class::SuccessOp);
+        assert_eq!(OP_CHECKSIGFROMSTACK.classify(ClassifyContext::TapScript), Class::SuccessOp);
+        assert_eq!(OP_TEMPLATEHASH.classify(ClassifyContext::TapScript), Class::SuccessOp);
     }
 
     #[test]
