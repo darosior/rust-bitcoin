@@ -66,9 +66,18 @@ sha256t_hash_newtype! {
     /// This hash type is used for computing taproot signature hash."
     #[hash_newtype(forward)]
     pub struct TapSighash(_);
+
+    pub struct TemplateHashTag = hash_str("TemplateHash");
+
+    /// Taproot-tagged hash with tag \"TemplateHash\".
+    ///
+    /// This hash type is used for computing OP_TEMPLATEHASH hash."
+    #[hash_newtype(forward)]
+    pub struct TemplateHash(_);
 }
 
 impl_message_from_hash!(TapSighash);
+impl_message_from_hash!(TemplateHash);
 
 /// Efficiently calculates signature hash message for legacy, segwit and taproot inputs.
 #[derive(Debug)]
@@ -669,10 +678,7 @@ impl<R: Borrow<Transaction>> SighashCache<R> {
         //      sha_annex (32): the SHA256 of (compact_size(size of annex) || annex), where annex
         //      includes the mandatory 0x50 prefix.
         if let Some(annex) = annex {
-            let mut enc = sha256::Hash::engine();
-            annex.consensus_encode(&mut enc)?;
-            let hash = sha256::Hash::from_engine(enc);
-            hash.consensus_encode(writer)?;
+            sha256_annex(annex)?.consensus_encode(writer)?;
         }
 
         // * Data about this output:
@@ -727,6 +733,49 @@ impl<R: Borrow<Transaction>> SighashCache<R> {
         )
         .map_err(SigningDataError::unwrap_sighash)?;
         Ok(TapSighash::from_engine(enc))
+    }
+
+    /// Encodes the BIP446 `OP_TEMPLATEHASH` data into a writer.
+    ///
+    /// The data encoded here is hashed with the [`TemplateHashTag`] tagged hash by
+    /// [`SighashCache::template_hash`]. It commits to transaction version, lock time, all input
+    /// sequences, all outputs, this input index, and this input's annex presence/hash. It does not
+    /// commit to prevouts, spent amounts, spent script pubkeys, scriptSigs, or other inputs'
+    /// annexes.
+    pub fn template_hash_encode_data_to<W: Write>(
+        &mut self,
+        writer: &mut W,
+        input_index: usize,
+        annex: Option<Annex>,
+    ) -> Result<(), SigningDataError<transaction::InputsIndexError>> {
+        self.tx.borrow().tx_in(input_index).map_err(SigningDataError::sighash)?;
+
+        // Transaction data.
+        self.tx.borrow().version.consensus_encode(writer)?;
+        self.tx.borrow().lock_time.consensus_encode(writer)?;
+        self.common_cache().sequences.consensus_encode(writer)?;
+        self.common_cache().outputs.consensus_encode(writer)?;
+
+        // Data about this input.
+        u8::from(annex.is_some()).consensus_encode(writer)?;
+        (input_index as u32).consensus_encode(writer)?;
+        if let Some(annex) = annex {
+            sha256_annex(annex)?.consensus_encode(writer)?;
+        }
+
+        Ok(())
+    }
+
+    /// Computes the BIP446 `OP_TEMPLATEHASH` hash for the provided input.
+    pub fn template_hash(
+        &mut self,
+        input_index: usize,
+        annex: Option<Annex>,
+    ) -> Result<TemplateHash, transaction::InputsIndexError> {
+        let mut enc = TemplateHash::engine();
+        self.template_hash_encode_data_to(&mut enc, input_index, annex)
+            .map_err(SigningDataError::unwrap_sighash)?;
+        Ok(TemplateHash::from_engine(enc))
     }
 
     /// Computes the BIP341 sighash for a key spend.
@@ -1160,6 +1209,12 @@ impl<'a> Encodable for Annex<'a> {
     }
 }
 
+fn sha256_annex(annex: Annex<'_>) -> Result<sha256::Hash, io::Error> {
+    let mut enc = sha256::Hash::engine();
+    annex.consensus_encode(&mut enc)?;
+    Ok(sha256::Hash::from_engine(enc))
+}
+
 /// Error computing a taproot sighash.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1500,6 +1555,7 @@ mod tests {
     use super::*;
     use crate::blockdata::locktime::absolute;
     use crate::consensus::deserialize;
+    use crate::opcodes::all::{OP_EQUAL, OP_TEMPLATEHASH};
 
     extern crate serde_json;
 
@@ -1577,6 +1633,65 @@ mod tests {
         enc.input(&bytes);
         let hash = TapSighash::from_engine(enc);
         assert_eq!(expected, hash.to_byte_array());
+    }
+
+    #[test]
+    fn template_hash_encode_lengths() {
+        let tx_bytes = Vec::from_hex("02000000000102c997a5e56e104102fa209c6a852dd90660a20b2d9c352423edce25857fcd37041500000000ffffffff169e1e83e930853391bc6f35f605c6754cfead57cf8387639d3b4096c54f18f40c00000000ffffffff01327906000000000016001482074bdf6ce32b071dd120a17cf99cbc01ad3080022320d1f1955b1327167cb7ae3dc39d52c277be39d75737b9cb80514ce6e825fd8eeace8721c050929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac00000000000").unwrap();
+        let tx: Transaction = deserialize(&tx_bytes).unwrap();
+
+        let mut cache = SighashCache::new(&tx);
+        let mut without_annex = Vec::new();
+        cache.template_hash_encode_data_to(&mut without_annex, 0, None).unwrap();
+        assert_eq!(without_annex.len(), 77);
+
+        let annex_bytes = hex!("5064617461");
+        let annex = Annex::new(&annex_bytes).unwrap();
+        let mut with_annex = Vec::new();
+        cache.template_hash_encode_data_to(&mut with_annex, 0, Some(annex)).unwrap();
+        assert_eq!(with_annex.len(), 109);
+    }
+
+    #[test]
+    fn bip446_template_hash_vectors() {
+        let data = include_str!("../../tests/data/bip446/basics.json");
+        let testdata = serde_json::from_str::<serde_json::Value>(data).unwrap();
+
+        for (case_index, t) in testdata.as_array().unwrap().iter().enumerate() {
+            let tx_hex = t.get("spending_tx").unwrap().as_str().unwrap();
+            let tx_bytes = Vec::from_hex(tx_hex).unwrap();
+            let tx: Transaction = deserialize(&tx_bytes).unwrap();
+            let input_index = t.get("input_index").unwrap().as_u64().unwrap() as usize;
+            let valid = t.get("valid").unwrap().as_bool().unwrap();
+            let comment = t.get("comment").unwrap().as_str().unwrap();
+
+            let expected = template_hash_from_bip446_witness(&tx, input_index);
+            let annex = tx.input[input_index]
+                .witness
+                .taproot_annex()
+                .map(|annex| Annex::new(annex).unwrap());
+            let mut cache = SighashCache::new(&tx);
+            let got = cache.template_hash(input_index, annex).unwrap();
+
+            assert_eq!(got == expected, valid, "case {case_index}: {comment}");
+        }
+    }
+
+    fn template_hash_from_bip446_witness(tx: &Transaction, input_index: usize) -> TemplateHash {
+        let leaf_script = tx.input[input_index]
+            .witness
+            .tapscript()
+            .expect("taproot script spend");
+        let bytes = leaf_script.as_bytes();
+
+        assert_eq!(bytes.len(), 35);
+        assert_eq!(bytes[0], 0x20);
+        assert_eq!(bytes[33], OP_TEMPLATEHASH.to_u8());
+        assert_eq!(bytes[34], OP_EQUAL.to_u8());
+
+        let mut template_hash = [0u8; 32];
+        template_hash.copy_from_slice(&bytes[1..33]);
+        TemplateHash::from_byte_array(template_hash)
     }
 
     #[test]
@@ -1749,6 +1864,13 @@ mod tests {
         );
         assert_eq!(
             c.legacy_signature_hash(10, Script::new(), 0u32),
+            Err(InputsIndexError(IndexOutOfBoundsError {
+                index: 10,
+                length: 1
+            }))
+        );
+        assert_eq!(
+            c.template_hash(10, None),
             Err(InputsIndexError(IndexOutOfBoundsError {
                 index: 10,
                 length: 1
