@@ -50,13 +50,6 @@ macro_rules! all_opcodes {
                 #[doc = $doc]
                 pub const $op: Opcode = Opcode { code: $val};
             )*
-
-            /// Bitcoin Inquisition/BIP349 alias for `OP_SUCCESS203`.
-            pub const OP_INTERNALKEY: Opcode = OP_RETURN_203;
-            /// Bitcoin Inquisition/BIP348 alias for `OP_SUCCESS204`.
-            pub const OP_CHECKSIGFROMSTACK: Opcode = OP_RETURN_204;
-            /// Bitcoin Inquisition/BIP446 alias for `OP_SUCCESS206`.
-            pub const OP_TEMPLATEHASH: Opcode = OP_RETURN_206;
         }
 
         /// Push an empty array onto the stack.
@@ -271,6 +264,12 @@ all_opcodes! {
     OP_NOP8 => 0xb7, "Does nothing.";
     OP_NOP9 => 0xb8, "Does nothing.";
     OP_NOP10 => 0xb9, "Does nothing.";
+
+    // BIP 448 opcodes.
+    OP_INTERNALKEY => 0xcb, "Push the Taproot internal key onto the stack. (Tapscript-only.)";
+    OP_CHECKSIGFROMSTACK => 0xcc, "Pop a signature (bottom), message and public key (top) from the stack. Push 1 if the signature is valid, 0 otherwise. (Tapscript-only.)";
+    OP_TEMPLATEHASH => 0xce, "Push the hash of the spending transaction onto the stack. (Tapscript-only.)";
+
     // Every other opcode acts as OP_RETURN
     OP_CHECKSIGADD => 0xba, "OP_CHECKSIGADD post tapscript.";
     OP_RETURN_187 => 0xbb, "Synonym for OP_RETURN.";
@@ -289,10 +288,7 @@ all_opcodes! {
     OP_RETURN_200 => 0xc8, "Synonym for OP_RETURN.";
     OP_RETURN_201 => 0xc9, "Synonym for OP_RETURN.";
     OP_RETURN_202 => 0xca, "Synonym for OP_RETURN.";
-    OP_RETURN_203 => 0xcb, "Synonym for OP_RETURN.";
-    OP_RETURN_204 => 0xcc, "Synonym for OP_RETURN.";
     OP_RETURN_205 => 0xcd, "Synonym for OP_RETURN.";
-    OP_RETURN_206 => 0xce, "Synonym for OP_RETURN.";
     OP_RETURN_207 => 0xcf, "Synonym for OP_RETURN.";
     OP_RETURN_208 => 0xd0, "Synonym for OP_RETURN.";
     OP_RETURN_209 => 0xd1, "Synonym for OP_RETURN.";
@@ -374,7 +370,7 @@ impl Opcode {
             | (OP_MUL, ctx) | (OP_DIV, ctx) | (OP_MOD, ctx)
             | (OP_LSHIFT, ctx) | (OP_RSHIFT, ctx) if ctx == ClassifyContext::Legacy => Class::IllegalOp,
 
-            // 87 opcodes of SuccessOp class only in TapScript context
+            // 84 opcodes of SuccessOp class only in TapScript context
             (op, ClassifyContext::TapScript)
                 if op.code == 80
                     || op.code == 98
@@ -383,7 +379,9 @@ impl Opcode {
                     || (op.code >= 137 && op.code <= 138)
                     || (op.code >= 141 && op.code <= 142)
                     || (op.code >= 149 && op.code <= 153)
-                    || (op.code >= 187 && op.code <= 254) =>
+                    || (op.code >= 187 && op.code <= 202)
+                    || (op.code == 205)
+                    || (op.code >= 207 && op.code <= 254) =>
                 Class::SuccessOp,
 
             // 11 opcodes of NoOp class
@@ -415,7 +413,7 @@ impl Opcode {
             // 76 opcodes of PushBytes class
             (op, _) if op.code <= OP_PUSHBYTES_75.code => Class::PushBytes(self.code as u32),
 
-            // opcodes of Ordinary class: 61 for Legacy and 60 for TapScript context
+            // opcodes of Ordinary class: 61 for Legacy and 63 for TapScript context
             (_, _) => Class::Ordinary(Ordinary::with(self)),
         }
     }
@@ -514,7 +512,7 @@ macro_rules! ordinary_opcode {
     );
 }
 
-// "Ordinary" opcodes -- should be 61 of these
+// "Ordinary" opcodes -- should be 64 of these
 ordinary_opcode! {
     // pushdata
     OP_PUSHDATA1, OP_PUSHDATA2, OP_PUSHDATA4,
@@ -537,7 +535,8 @@ ordinary_opcode! {
     OP_RIPEMD160, OP_SHA1, OP_SHA256, OP_HASH160, OP_HASH256,
     OP_CODESEPARATOR, OP_CHECKSIG, OP_CHECKSIGVERIFY,
     OP_CHECKMULTISIG, OP_CHECKMULTISIGVERIFY,
-    OP_CHECKSIGADD
+    OP_CHECKSIGADD,
+    OP_INTERNALKEY, OP_CHECKSIGFROMSTACK, OP_TEMPLATEHASH
 }
 
 impl Ordinary {
@@ -586,9 +585,9 @@ mod tests {
             .into_script();
         assert_eq!(script.as_bytes(), &[0xce, 0xcb, 0xcc]);
 
-        assert_eq!(OP_INTERNALKEY.classify(ClassifyContext::TapScript), Class::SuccessOp);
-        assert_eq!(OP_CHECKSIGFROMSTACK.classify(ClassifyContext::TapScript), Class::SuccessOp);
-        assert_eq!(OP_TEMPLATEHASH.classify(ClassifyContext::TapScript), Class::SuccessOp);
+        assert_eq!(OP_INTERNALKEY.classify(ClassifyContext::TapScript), Class::Ordinary(Ordinary::OP_INTERNALKEY));
+        assert_eq!(OP_CHECKSIGFROMSTACK.classify(ClassifyContext::TapScript), Class::Ordinary(Ordinary::OP_CHECKSIGFROMSTACK));
+        assert_eq!(OP_TEMPLATEHASH.classify(ClassifyContext::TapScript), Class::Ordinary(Ordinary::OP_TEMPLATEHASH));
     }
 
     #[test]
@@ -863,10 +862,10 @@ mod tests {
         roundtrip!(unique, OP_RETURN_200);
         roundtrip!(unique, OP_RETURN_201);
         roundtrip!(unique, OP_RETURN_202);
-        roundtrip!(unique, OP_RETURN_203);
-        roundtrip!(unique, OP_RETURN_204);
+        roundtrip!(unique, OP_INTERNALKEY);
+        roundtrip!(unique, OP_CHECKSIGFROMSTACK);
         roundtrip!(unique, OP_RETURN_205);
-        roundtrip!(unique, OP_RETURN_206);
+        roundtrip!(unique, OP_TEMPLATEHASH);
         roundtrip!(unique, OP_RETURN_207);
         roundtrip!(unique, OP_RETURN_208);
         roundtrip!(unique, OP_RETURN_209);
